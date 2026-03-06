@@ -13,6 +13,7 @@ import telebot
 from dotenv import load_dotenv
 from openpyxl import Workbook, load_workbook
 from apscheduler.schedulers.background import BackgroundScheduler
+import requests
 
 from test import PresensiClient
 
@@ -340,6 +341,18 @@ def handle_photo(message: telebot.types.Message):
             bot.reply_to(message, f"Absen berhasil. {result.get('message', '')}")
         else:
             bot.reply_to(message, f"Absen gagal: {result.get('message', repr(result))}")
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code if e.response is not None else "unknown"
+        body = ""
+        try:
+            body = e.response.text[:500] if e.response is not None else ""
+        except Exception:
+            body = ""
+        bot.reply_to(
+            message,
+            f"HTTP error saat absen (status {status_code}). "
+            f"Body: {body or 'tanpa body / tidak dapat dibaca.'}",
+        )
     except Exception as e:
         bot.reply_to(message, f"Error: {e}")
     finally:
@@ -387,6 +400,23 @@ def run_scheduled_absens() -> None:
             if chat_id_str:
                 try:
                     bot.send_message(int(chat_id_str), msg)
+                except Exception:
+                    pass
+        except requests.exceptions.HTTPError as e:
+            mark_schedule_done(row_idx)
+            status_code = e.response.status_code if e.response is not None else "unknown"
+            body = ""
+            try:
+                body = e.response.text[:500] if e.response is not None else ""
+            except Exception:
+                body = ""
+            if chat_id_str:
+                try:
+                    bot.send_message(
+                        int(chat_id_str),
+                        f"Jadwal absen HTTP error (status {status_code}). "
+                        f"Body: {body or 'tanpa body / tidak dapat dibaca.'}",
+                    )
                 except Exception:
                     pass
         except Exception as e:

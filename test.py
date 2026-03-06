@@ -140,13 +140,17 @@ class PresensiClient:
             timeout=timeout,
             headers={"Accept": "application/json"},
         )
-        resp.raise_for_status()  # raise if HTTP error
 
         try:
             payload = resp.json()
         except ValueError:
-            raise RuntimeError(f"Non-JSON response from presensi endpoint: {resp.text[:500]}")
+            payload = None
 
+        # Server returns 400 with JSON for business rules (e.g. "Anda Sudah Absen Pulang Hari Ini")
+        if not resp.ok and payload and isinstance(payload, dict) and "message" in payload:
+            return payload  # let caller show message to user
+
+        resp.raise_for_status()
         return payload
 
 
