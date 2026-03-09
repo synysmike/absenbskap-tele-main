@@ -64,6 +64,11 @@ IMAGES_DIR = Path("images")
 # Headers for schedule sheet
 SCHEDULE_HEADERS = ["username", "status", "date", "time", "image_path", "done", "chat_id"]
 
+# Absen log Excel
+ABSEN_LOG_EXCEL = Path("absen_log.xlsx")
+ABSEN_LOG_SHEET = "Log"
+ABSEN_LOG_HEADERS = ["timestamp", "username", "status", "type", "success", "message"]
+
 
 def ensure_schedule_excel() -> None:
     if not SCHEDULES_EXCEL.exists():
@@ -80,6 +85,37 @@ def add_schedule(username: str, status: str, date: str, time: str, image_path: s
     ws = wb[SHEET_NAME]
     ws.append([username, status, date, time, image_path, "N", str(chat_id)])
     wb.save(SCHEDULES_EXCEL)
+
+
+def ensure_absen_log_excel() -> None:
+    if not ABSEN_LOG_EXCEL.exists():
+        wb = Workbook()
+        ws = wb.active
+        ws.title = ABSEN_LOG_SHEET
+        ws.append(ABSEN_LOG_HEADERS)
+        wb.save(ABSEN_LOG_EXCEL)
+
+
+def add_absen_log(username: str, status: str, log_type: str, success: bool, message: str) -> None:
+    """
+    Append one absen log row.
+    log_type: 'immediate' or 'schedule'
+    """
+    ensure_absen_log_excel()
+    wb = load_workbook(ABSEN_LOG_EXCEL)
+    ws = wb[ABSEN_LOG_SHEET]
+    ts = datetime.now()
+    ws.append(
+        [
+            ts,
+            username,
+            status,
+            log_type,
+            "Y" if success else "N",
+            (message or "").strip(),
+        ]
+    )
+    wb.save(ABSEN_LOG_EXCEL)
 
 
 def _excel_date_str(val: Any) -> str:
@@ -127,6 +163,50 @@ def get_due_schedules() -> list:
         except Exception:
             continue
     return due
+
+
+def get_user_schedules(username: str) -> list[Dict[str, Any]]:
+    """
+    Return list of schedules for a username (case-insensitive).
+    Each item: {username, status, date, time, done}.
+    """
+    username = username.lower()
+    if not SCHEDULES_EXCEL.exists():
+        return []
+    wb = load_workbook(SCHEDULES_EXCEL, read_only=False)
+    ws = wb[SHEET_NAME]
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    headers = SCHEDULE_HEADERS
+    items: list[Dict[str, Any]] = []
+    for row in rows:
+        if not row or len(row) < 7:
+            continue
+        d = dict(zip(headers, row))
+        row_user = str(d.get("username") or "").strip().lower()
+        if row_user != username:
+            continue
+        date_str = _excel_date_str(d.get("date"))
+        time_str = _excel_time_str(d.get("time"))
+        if not date_str or not time_str:
+            continue
+        items.append(
+            {
+                "username": row_user,
+                "status": str(d.get("status") or "").strip().lower(),
+                "date": date_str,
+                "time": time_str,
+                "done": str(d.get("done") or "").strip().upper() == "Y",
+            }
+        )
+    # sort by datetime ascending
+    def _key(it: Dict[str, Any]):
+        try:
+            return parse_schedule_datetime(it["date"], it["time"])
+        except Exception:
+            return datetime.max
+
+    items.sort(key=_key)
+    return items
 
 
 def parse_schedule_datetime(date_str: str, time_str: str) -> datetime:
@@ -190,6 +270,7 @@ def get_help_text() -> str:
         "Format: `nama_status;tanggal;jam`\n"
         "Contoh: `teguh_in;09mar2026;07:17`\n"
         "Tanggal: DDmonYYYY, Jam: HH:MM. Lalu kirim foto selfie. Absen otomatis di waktu jadwal.\n\n"
+        "*Batal:* Kirim `batal` atau /batal saat menunggu foto untuk membatalkan jadwal atau absen langsung.\n\n"
         "_Lokasi diacak 2–6 m dari cabang._"
     )
 
@@ -264,7 +345,7 @@ def handle_immediate_absen(message: telebot.types.Message):
         "username": username,
         "status": status,
     }
-    bot.reply_to(message, "Kirim foto selfie untuk absen sekarang (direct).")
+    bot.reply_to(message, "Kirim foto selfie untuk absen sekarang (direct). (Kirim *batal* atau /batal untuk membatalkan.)", parse_mode="Markdown")
 
 
 @bot.message_handler(func=lambda m: parse_schedule_command(m.text))
@@ -281,8 +362,68 @@ def handle_schedule_absen(message: telebot.types.Message):
     }
     bot.reply_to(
         message,
-        f"Jadwal: {parsed['username']}_{parsed['status']} pada {parsed['date']} {parsed['time']}. Kirim foto selfie untuk menyimpan jadwal.",
+        f"Jadwal: {parsed['username']}_{parsed['status']} pada {parsed['date']} {parsed['time']}. Kirim foto selfie untuk menyimpan jadwal. (Kirim *batal* atau /batal untuk membatalkan.)",
+        parse_mode="Markdown",
     )
+
+
+def is_cancel_command(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in ("batal", "/batal", "cancel", "/cancel")
+
+
+def is_cek_command(text: str) -> Optional[str]:
+    """
+    Parse cek_<username> to username (lowercase) if valid, else None.
+    Examples: cek_teguh, /cek_teguh.
+    """
+    if not text:
+        return None
+    t = text.strip().lower()
+    if t.startswith("/"):
+        t = t[1:]
+    if not t.startswith("cek_"):
+        return None
+    username = t.split("cek_", 1)[1]
+    if username in USER_CREDENTIALS:
+        return username
+    return None
+
+
+@bot.message_handler(func=lambda m: is_cek_command(m.text) is not None)
+def handle_cek_schedule(message: telebot.types.Message):
+    username = is_cek_command(message.text)
+    if not username:
+        bot.reply_to(message, "User tidak dikenali untuk perintah cek_.")
+        return
+    items = get_user_schedules(username)
+    if not items:
+        bot.reply_to(message, f"Tidak ada jadwal untuk {username}.")
+        return
+    # Tampilkan maksimal 10 jadwal terdekat
+    lines = [f"Jadwal untuk *{username}* (maks 10):"]
+    for idx, it in enumerate(items[:10], start=1):
+        status = it["status"]
+        date_str = it["date"]
+        time_str = it["time"]
+        done = "SUDAH" if it["done"] else "BELUM"
+        lines.append(f"{idx}. {status} — {date_str} {time_str} ({done})")
+    bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: is_cancel_command(m.text))
+def handle_cancel(message: telebot.types.Message):
+    chat_id = message.chat.id
+    if chat_id not in user_states:
+        bot.reply_to(message, "Tidak ada permintaan yang menunggu foto. Tidak ada yang dibatalkan.")
+        return
+    state = user_states[chat_id]
+    action = state.get("action", "")
+    del user_states[chat_id]
+    if action == "schedule":
+        bot.reply_to(message, "Jadwal absen dibatalkan. Tidak ada jadwal yang disimpan.")
+    else:
+        bot.reply_to(message, "Absen langsung dibatalkan.")
 
 
 @bot.message_handler(content_types=["photo"])
@@ -339,8 +480,10 @@ def handle_photo(message: telebot.types.Message):
         )
         if result.get("status") is True:
             bot.reply_to(message, f"Absen berhasil. {result.get('message', '')}")
+            add_absen_log(username, status, "immediate", True, result.get("message", ""))
         else:
             bot.reply_to(message, f"Absen gagal: {result.get('message', repr(result))}")
+            add_absen_log(username, status, "immediate", False, result.get("message", repr(result)))
     except requests.exceptions.HTTPError as e:
         status_code = e.response.status_code if e.response is not None else "unknown"
         body = ""
@@ -353,8 +496,10 @@ def handle_photo(message: telebot.types.Message):
             f"HTTP error saat absen (status {status_code}). "
             f"Body: {body or 'tanpa body / tidak dapat dibaca.'}",
         )
+        add_absen_log(username, status, "immediate", False, f"HTTP {status_code}: {body}")
     except Exception as e:
         bot.reply_to(message, f"Error: {e}")
+        add_absen_log(username, status, "immediate", False, str(e))
     finally:
         del user_states[chat_id]
 
@@ -397,6 +542,7 @@ def run_scheduled_absens() -> None:
             )
             mark_schedule_done(row_idx)
             msg = f"Jadwal absen {username}_{status} selesai. {result.get('message', '')}" if result.get("status") else f"Jadwal absen gagal: {result.get('message', repr(result))}"
+            add_absen_log(username, status, "schedule", bool(result.get("status")), result.get("message", repr(result)))
             if chat_id_str:
                 try:
                     bot.send_message(int(chat_id_str), msg)
@@ -410,6 +556,7 @@ def run_scheduled_absens() -> None:
                 body = e.response.text[:500] if e.response is not None else ""
             except Exception:
                 body = ""
+            add_absen_log(username, status, "schedule", False, f"HTTP {status_code}: {body}")
             if chat_id_str:
                 try:
                     bot.send_message(
@@ -421,6 +568,7 @@ def run_scheduled_absens() -> None:
                     pass
         except Exception as e:
             mark_schedule_done(row_idx)
+            add_absen_log(username, status, "schedule", False, str(e))
             if chat_id_str:
                 try:
                     bot.send_message(int(chat_id_str), f"Jadwal absen error: {e}")
