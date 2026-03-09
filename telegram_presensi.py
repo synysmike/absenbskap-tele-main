@@ -273,6 +273,7 @@ def get_help_text() -> str:
         "*Perintah:*\n"
         "/start — Panduan singkat\n"
         "/help — Bantuan ini\n"
+        "/users — Daftar user & perintah per user\n"
         "`cek_teguh` — Lihat / hapus jadwal user (ganti nama)\n"
         "`batal` — Batalkan permintaan selfie yang sedang berjalan\n\n"
         "*1. Absen langsung:*\n"
@@ -297,8 +298,9 @@ def cmd_start(message: telebot.types.Message):
         f"*Bot Presensi BSKAP siap dipakai.*\n\n"
         f"- Gunakan **direct absen** dengan kirim `teguh_in_now` / `teguh_out_now` (atau `teguh_in` / `teguh_out`), lalu kirim foto selfie.\n"
         f"- Gunakan **jadwal absen** dengan format `teguh_in;09mar2026;07:17`, lalu kirim foto selfie.\n"
-        f"- Ketik `cek_teguh` untuk melihat jadwal milik user.\n"
-        f"- Saat diminta foto, kirim `batal` atau /batal untuk membatalkan.\n\n"
+        f"- Ketik `cek_teguh` untuk melihat dan menghapus jadwal milik user (atau `cek_<nama>` untuk user lain).\n"
+        f"- Saat diminta foto, kirim `batal` atau /batal untuk membatalkan permintaan yang sedang berjalan.\n"
+        f"- Lihat semua user & perintah per user dengan /users.\n\n"
         f"User yang dikonfigurasi: {names}.\n\n"
         f"Detail lengkap: gunakan perintah /help.",
         parse_mode="Markdown",
@@ -309,6 +311,23 @@ def cmd_start(message: telebot.types.Message):
 def cmd_help(message: telebot.types.Message):
     bot.reply_to(message, get_help_text(), parse_mode="Markdown")
 
+
+@bot.message_handler(commands=["users"])
+def cmd_users(message: telebot.types.Message):
+    if not USER_CREDENTIALS:
+        bot.reply_to(message, "Belum ada user yang dikonfigurasi di bot.")
+        return
+    lines = ["*Daftar user & perintah:*", ""]
+    for name in USER_CREDENTIALS.keys():
+        uname = name.lower()
+        lines.append(f"*{uname}*:")
+        lines.append(f"- Absen masuk: `{uname}_in` atau `{uname}_in_now`")
+        lines.append(f"- Absen pulang: `{uname}_out` atau `{uname}_out_now`")
+        lines.append(f"- Jadwal masuk: `{uname}_in;09mar2026;07:17`")
+        lines.append(f"- Jadwal pulang: `{uname}_out;09mar2026;17:00`")
+        lines.append(f"- Cek jadwal: `cek_{uname}`")
+        lines.append("")
+    bot.reply_to(message, "\n".join(lines).rstrip(), parse_mode="Markdown")
 
 def is_immediate_command(text: str) -> bool:
     return text and text.strip().lower() in [c.lower() for c in IMMEDIATE_COMMANDS]
