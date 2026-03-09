@@ -178,7 +178,7 @@ def get_user_schedules(username: str) -> list[Dict[str, Any]]:
     rows = list(ws.iter_rows(min_row=2, values_only=True))
     headers = SCHEDULE_HEADERS
     items: list[Dict[str, Any]] = []
-    for row in rows:
+    for idx, row in enumerate(rows, start=2):
         if not row or len(row) < 7:
             continue
         d = dict(zip(headers, row))
@@ -191,6 +191,7 @@ def get_user_schedules(username: str) -> list[Dict[str, Any]]:
             continue
         items.append(
             {
+                "row_idx": idx,
                 "username": row_user,
                 "status": str(d.get("status") or "").strip().lower(),
                 "date": date_str,
@@ -234,6 +235,14 @@ def mark_schedule_done(row_idx: int) -> None:
     wb.save(SCHEDULES_EXCEL)
 
 
+def delete_schedule_row(row_idx: int) -> None:
+    """Delete a schedule row by Excel row index."""
+    wb = load_workbook(SCHEDULES_EXCEL, read_only=False)
+    ws = wb[SHEET_NAME]
+    ws.delete_rows(row_idx, 1)
+    wb.save(SCHEDULES_EXCEL)
+
+
 def save_schedule_image(username: str, date_str: str, time_str: str, image_bytes: bytes) -> Path:
     """Save image to images/<username>/<date>_<time>.png. Time without colon."""
     safe_time = time_str.replace(":", "")
@@ -254,6 +263,7 @@ def photo_to_data_uri(image_bytes: bytes, mime: str = "image/png") -> str:
 # --- Bot ---
 bot = telebot.TeleBot(API_TOKEN)
 user_states: Dict[int, Dict[str, Any]] = {}
+schedule_view_states: Dict[int, list[Dict[str, Any]]] = {}
 
 # Help text for /help command (Telegram Markdown)
 def get_help_text() -> str:
@@ -262,7 +272,9 @@ def get_help_text() -> str:
         "*Bot Presensi BSKAP*\n\n"
         "*Perintah:*\n"
         "/start — Panduan singkat\n"
-        "/help — Bantuan ini\n\n"
+        "/help — Bantuan ini\n"
+        "`cek_teguh` — Lihat / hapus jadwal user (ganti nama)\n"
+        "`batal` — Batalkan permintaan selfie yang sedang berjalan\n\n"
         "*1. Absen langsung:*\n"
         "Kirim `teguh_in` / `teguh_in_now` (masuk) atau `teguh_out` / `teguh_out_now` (keluar), lalu foto selfie.\n"
         f"User: {names}\n\n"
@@ -271,6 +283,8 @@ def get_help_text() -> str:
         "Contoh: `teguh_in;09mar2026;07:17`\n"
         "Tanggal: DDmonYYYY, Jam: HH:MM. Lalu kirim foto selfie. Absen otomatis di waktu jadwal.\n\n"
         "*Batal:* Kirim `batal` atau /batal saat menunggu foto untuk membatalkan jadwal atau absen langsung.\n\n"
+        "*Cek jadwal:* Kirim `cek_teguh` (atau `cek_<nama>`) untuk melihat daftar jadwal user tersebut (maks 10 teratas). Balas angka (1–N) untuk menghapus salah satu jadwal.\n\n"
+        "*Log absen:* Semua absen (langsung & jadwal) direkap ke file `absen_log.xlsx` sebagai backup bila terjadi error di server/bot.\n\n"
         "_Lokasi diacak 2–6 m dari cabang._"
     )
 
@@ -280,11 +294,13 @@ def cmd_start(message: telebot.types.Message):
     names = ", ".join(USER_CREDENTIALS.keys()) if USER_CREDENTIALS else "teguh, guntur, ..."
     bot.reply_to(
         message,
-        f"Bot Presensi BSKAP.\n\n"
-        f"**Direct absen (sekarang):** kirim `teguh_in_now` atau `teguh_out_now` (atau `teguh_in`/`teguh_out`), lalu kirim foto selfie. User: {names}.\n\n"
-        f"**Jadwal absen:** kirim format\n"
-        f"`teguh_in;09mar2026;07:17`\n"
-        f"(nama_status;tanggal;jam). Lalu kirim foto selfie. Absen akan otomatis di waktu yang dijadwalkan.",
+        f"*Bot Presensi BSKAP siap dipakai.*\n\n"
+        f"- Gunakan **direct absen** dengan kirim `teguh_in_now` / `teguh_out_now` (atau `teguh_in` / `teguh_out`), lalu kirim foto selfie.\n"
+        f"- Gunakan **jadwal absen** dengan format `teguh_in;09mar2026;07:17`, lalu kirim foto selfie.\n"
+        f"- Ketik `cek_teguh` untuk melihat jadwal milik user.\n"
+        f"- Saat diminta foto, kirim `batal` atau /batal untuk membatalkan.\n\n"
+        f"User yang dikonfigurasi: {names}.\n\n"
+        f"Detail lengkap: gunakan perintah /help.",
         parse_mode="Markdown",
     )
 
@@ -400,8 +416,10 @@ def handle_cek_schedule(message: telebot.types.Message):
     if not items:
         bot.reply_to(message, f"Tidak ada jadwal untuk {username}.")
         return
+    # Simpan state untuk memungkinkan penghapusan jadwal dengan balasan angka
+    schedule_view_states[message.chat.id] = items[:10]
     # Tampilkan maksimal 10 jadwal terdekat
-    lines = [f"Jadwal untuk *{username}* (maks 10):"]
+    lines = [f"Jadwal untuk *{username}* (maks 10). Balas angka (1-{min(len(items), 10)}) untuk menghapus jadwal tersebut:"]
     for idx, it in enumerate(items[:10], start=1):
         status = it["status"]
         date_str = it["date"]
@@ -409,6 +427,45 @@ def handle_cek_schedule(message: telebot.types.Message):
         done = "SUDAH" if it["done"] else "BELUM"
         lines.append(f"{idx}. {status} — {date_str} {time_str} ({done})")
     bot.reply_to(message, "\n".join(lines), parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: (m.chat.id in schedule_view_states) and (m.text or "").strip().isdigit())
+def handle_cek_delete(message: telebot.types.Message):
+    chat_id = message.chat.id
+    text = (message.text or "").strip()
+    items = schedule_view_states.get(chat_id, [])
+    if not items:
+        bot.reply_to(message, "Tidak ada jadwal yang bisa dihapus.")
+        schedule_view_states.pop(chat_id, None)
+        return
+    try:
+        idx = int(text)
+    except ValueError:
+        bot.reply_to(message, "Masukkan angka yang valid sesuai nomor jadwal.")
+        return
+    if idx < 1 or idx > len(items):
+        bot.reply_to(message, f"Nomor jadwal harus antara 1 dan {len(items)}.")
+        return
+    item = items[idx - 1]
+    row_idx = item.get("row_idx")
+    username = item.get("username", "")
+    status = item.get("status", "")
+    date_str = item.get("date", "")
+    time_str = item.get("time", "")
+    if not row_idx:
+        bot.reply_to(message, "Gagal menemukan baris jadwal untuk dihapus.")
+        return
+    try:
+        delete_schedule_row(row_idx)
+        bot.reply_to(
+            message,
+            f"Jadwal ke-{idx} untuk *{username}* ({status} — {date_str} {time_str}) telah dihapus.",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        bot.reply_to(message, f"Gagal menghapus jadwal: {e}")
+    finally:
+        schedule_view_states.pop(chat_id, None)
 
 
 @bot.message_handler(func=lambda m: is_cancel_command(m.text))
