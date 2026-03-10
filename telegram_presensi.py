@@ -397,8 +397,8 @@ def handle_schedule_absen(message: telebot.types.Message):
     }
     bot.reply_to(
         message,
-        f"Jadwal: {parsed['username']}_{parsed['status']} pada {parsed['date']} {parsed['time']}. Kirim foto selfie untuk menyimpan jadwal. (Kirim *batal* atau /batal untuk membatalkan.)",
-        parse_mode="Markdown",
+        f"Jadwal: {parsed['username']}_{parsed['status']} pada {parsed['date']} {parsed['time']}. "
+        f"Kirim foto selfie untuk menyimpan jadwal. (Ketik 'batal' atau /batal untuk membatalkan.)",
     )
 
 
